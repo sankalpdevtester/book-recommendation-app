@@ -7,50 +7,53 @@ interface CacheOptions {
 }
 
 class Cache {
-  private cache: { [key: string]: { data: any; expiresAt: number } };
+  private cache: Map<string, { data: any; expiresAt: number }>;
   private ttl: number;
 
   constructor(options: CacheOptions) {
-    this.cache = {};
+    this.cache = new Map();
     this.ttl = options.ttl;
   }
 
   get(key: string): any {
-    const cachedValue = this.cache[key];
+    const cachedValue = this.cache.get(key);
     if (!cachedValue) return null;
     if (cachedValue.expiresAt < Date.now()) {
-      delete this.cache[key];
+      this.cache.delete(key);
       return null;
     }
     return cachedValue.data;
   }
 
   set(key: string, data: any): void {
-    this.cache[key] = {
-      data,
-      expiresAt: Date.now() + this.ttl * 1000,
-    };
+    const expiresAt = Date.now() + this.ttl * 1000;
+    this.cache.set(key, { data, expiresAt });
   }
 
   delete(key: string): void {
-    delete this.cache[key];
+    this.cache.delete(key);
   }
 }
 
-const cache = new Cache({ ttl: 60 * 5 }); // 5 minutes
+const cache = new Cache({ ttl: 300 }); // 5 minutes
+
+const getCacheKey = (query: string, variables: any): string => {
+  return JSON.stringify({ query, variables });
+};
 
 const cacheMiddleware = async (
-  request: any,
-  next: (request: any) => Promise<GraphQLResponse>
-) => {
-  const cacheKey = request.variables;
-  const cachedResponse = cache.get(JSON.stringify(cacheKey));
+  client: ApolloClient<any>,
+  { query, variables }: any,
+  next: any
+): Promise<GraphQLResponse> => {
+  const cacheKey = getCacheKey(query, variables);
+  const cachedResponse = cache.get(cacheKey);
   if (cachedResponse) {
     return cachedResponse;
   }
 
-  const response = await next(request);
-  cache.set(JSON.stringify(cacheKey), response);
+  const response = await next();
+  cache.set(cacheKey, response);
   return response;
 };
 
