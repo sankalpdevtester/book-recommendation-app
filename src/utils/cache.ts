@@ -1,70 +1,71 @@
 // src/utils/cache.ts
 import { ApolloClient, InMemoryCache } from '@apollo/client';
-import { GraphQLResponse } from 'graphql';
+import { Book } from '../server/models/Book';
+import { User } from '../server/models/User';
 
-interface CacheOptions {
-  ttl: number; // time to live in seconds
+interface CacheConfig {
+  ttl: number;
 }
 
 class Cache {
-  private cache: Map<string, { data: any; expiresAt: number }>;
+  private cache: InMemoryCache;
   private ttl: number;
 
-  constructor(options: CacheOptions) {
-    this.cache = new Map();
-    this.ttl = options.ttl;
+  constructor(config: CacheConfig) {
+    this.cache = new InMemoryCache();
+    this.ttl = config.ttl;
   }
 
-  get(key: string): any {
-    const cachedValue = this.cache.get(key);
-    if (!cachedValue) return null;
-    if (cachedValue.expiresAt < Date.now()) {
-      this.cache.delete(key);
-      return null;
+  async get(key: string): Promise<any> {
+    const cachedResponse = await this.cache.restore();
+    if (cachedResponse && cachedResponse[key]) {
+      return cachedResponse[key];
     }
-    return cachedValue.data;
+    return null;
   }
 
-  set(key: string, data: any): void {
-    const expiresAt = Date.now() + this.ttl * 1000;
-    this.cache.set(key, { data, expiresAt });
+  async set(key: string, value: any): Promise<void> {
+    await this.cache.persist({
+      [key]: value,
+    });
+    setTimeout(async () => {
+      await this.cache.evict({ fieldName: key });
+    }, this.ttl);
   }
 
-  delete(key: string): void {
-    this.cache.delete(key);
+  async evict(key: string): Promise<void> {
+    await this.cache.evict({ fieldName: key });
   }
 }
 
-const cache = new Cache({ ttl: 300 }); // 5 minutes
-
-const getCacheKey = (query: string, variables: any): string => {
-  return JSON.stringify({ query, variables });
+const cacheConfig: CacheConfig = {
+  ttl: 30000, // 30 seconds
 };
 
-const cacheMiddleware = async (
-  client: ApolloClient<any>,
-  { query, variables }: any,
-  next: any
-): Promise<GraphQLResponse> => {
-  const cacheKey = getCacheKey(query, variables);
-  const cachedResponse = cache.get(cacheKey);
-  if (cachedResponse) {
-    return cachedResponse;
+const cache = new Cache(cacheConfig);
+
+export async function getBookFromCache(bookId: string): Promise<Book | null> {
+  const cachedBook = await cache.get(`book:${bookId}`);
+  if (cachedBook) {
+    return cachedBook;
   }
+  return null;
+}
 
-  const response = await next();
-  cache.set(cacheKey, response);
-  return response;
-};
+export async function setBookInCache(book: Book): Promise<void> {
+  await cache.set(`book:${book.id}`, book);
+}
 
-export { cacheMiddleware };
+export async function getUserFromCache(userId: string): Promise<User | null> {
+  const cachedUser = await cache.get(`user:${userId}`);
+  if (cachedUser) {
+    return cachedUser;
+  }
+  return null;
+}
 
-// Example usage in src/apollo-client.ts
-import { ApolloClient, InMemoryCache } from '@apollo/client';
-import { cacheMiddleware } from './utils/cache';
+export async function setUserInCache(user: User): Promise<void> {
+  await cache.set(`user:${user.id}`, user);
+}
 
-const client = new ApolloClient({
-  uri: 'http://localhost:4000/graphql',
-  cache: new InMemoryCache(),
-  middleware: [cacheMiddleware],
-});
+export default cache;
