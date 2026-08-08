@@ -1,136 +1,141 @@
 // src/utils/cacheUtils.ts
 import { ApolloClient, InMemoryCache } from '@apollo/client';
 import { Cache } from 'apollo-cache-inmemory';
-import { User } from '../server/models/User';
+import { stringify } from 'querystring';
 
-interface CacheUtils {
-  getCache: () => InMemoryCache;
-  clearCache: () => void;
-  cacheUser: (user: User) => void;
-  clearUserCache: () => void;
+interface CacheOptions {
+  ttl: number;
 }
 
-const cacheUtils: CacheUtils = {
-  getCache: () => {
-    const client = new ApolloClient({
-      uri: 'http://localhost:4000/graphql',
-      cache: new InMemoryCache(),
-    });
-    return client.cache;
-  },
+class CacheUtils {
+  private cache: InMemoryCache;
+  private ttl: number;
 
-  clearCache: () => {
-    const cache = cacheUtils.getCache();
-    cache.reset();
-  },
-
-  cacheUser: (user: User) => {
-    const cache = cacheUtils.getCache();
-    cache.writeQuery({
-      query: gql`
-        query GetUser {
-          user {
-            id
-            name
-            email
-          }
-        }
-      `,
-      data: {
-        user,
-      },
-    });
-  },
-
-  clearUserCache: () => {
-    const cache = cacheUtils.getCache();
-    cache.writeQuery({
-      query: gql`
-        query GetUser {
-          user {
-            id
-            name
-            email
-          }
-        }
-      `,
-      data: {
-        user: null,
-      },
-    });
-  },
-};
-
-export default cacheUtils;
-``}
-
-```typescript
-// src/apollo-client.ts
-import { ApolloClient, InMemoryCache } from '@apollo/client';
-import cacheUtils from './utils/cacheUtils';
-
-const client = new ApolloClient({
-  uri: 'http://localhost:4000/graphql',
-  cache: new InMemoryCache(),
-});
-
-cacheUtils.getCache();
-
-export default client;
-``}
-
-```typescript
-// src/server/services/UserService.ts
-import cacheUtils from '../utils/cacheUtils';
-
-class UserService {
-  async getUser(id: string) {
-    const user = await User.findById(id);
-    cacheUtils.cacheUser(user);
-    return user;
+  constructor(cache: InMemoryCache, options: CacheOptions) {
+    this.cache = cache;
+    this.ttl = options.ttl;
   }
 
-  async clearUserCache() {
-    cacheUtils.clearUserCache();
+  public getCacheKey(query: string, variables: any): string {
+    return `${query}_${stringify(variables)}`;
+  }
+
+  public getFromCache(query: string, variables: any): any {
+    const cacheKey = this.getCacheKey(query, variables);
+    return this.cache.get(cacheKey);
+  }
+
+  public setInCache(query: string, variables: any, data: any): void {
+    const cacheKey = this.getCacheKey(query, variables);
+    this.cache.set(cacheKey, data);
+    this.cache.set(`ttl_${cacheKey}`, Date.now() + this.ttl);
+  }
+
+  public isValidCache(query: string, variables: any): boolean {
+    const cacheKey = this.getCacheKey(query, variables);
+    const ttlKey = `ttl_${cacheKey}`;
+    const ttl = this.cache.get(ttlKey);
+    if (ttl) {
+      return Date.now() < ttl;
+    }
+    return false;
+  }
+
+  public clearCache(query: string, variables: any): void {
+    const cacheKey = this.getCacheKey(query, variables);
+    this.cache.remove(cacheKey);
+    this.cache.remove(`ttl_${cacheKey}`);
   }
 }
 
-export default UserService;
-``}
+export function createCacheUtils(client: ApolloClient<any>, options: CacheOptions): CacheUtils {
+  return new CacheUtils(client.cache, options);
+}
 
+export function useCacheUtils(): CacheUtils {
+  const client = require('../apollo-client').default;
+  const cacheUtils = createCacheUtils(client, { ttl: 30000 });
+  return cacheUtils;
+}
+```
 ```typescript
-// src/pages/Login.tsx
-import React, { useState } from 'react';
-import { useMutation } from '@apollo/client';
-import cacheUtils from '../utils/cacheUtils';
+// src/pages/BookSearch.tsx
+import React, { useState, useEffect } from 'react';
+import { useApolloClient } from '@apollo/client';
+import { useCacheUtils } from '../utils/cacheUtils';
 
-const Login = () => {
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [login] = useMutation(LOGIN_MUTATION);
+const BookSearch = () => {
+  const client = useApolloClient();
+  const cacheUtils = useCacheUtils();
+  const [books, setBooks] = useState([]);
+  const [query, setQuery] = useState('');
 
-  const handleLogin = async () => {
-    try {
-      const response = await login({
-        variables: {
-          email,
-          password,
-        },
+  useEffect(() => {
+    const fetchBooks = async () => {
+      const query = `
+        query {
+          books {
+            id
+            title
+            author
+          }
+        }
+      `;
+      const variables = {};
+      if (cacheUtils.isValidCache(query, variables)) {
+        const cachedData = cacheUtils.getFromCache(query, variables);
+        setBooks(cachedData);
+      } else {
+        const response = await client.query({
+          query,
+          variables,
+        });
+        cacheUtils.setInCache(query, variables, response.data.books);
+        setBooks(response.data.books);
+      }
+    };
+    fetchBooks();
+  }, [query, client, cacheUtils]);
+
+  const handleSearch = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const query = `
+      query {
+        books(search: "${query}") {
+          id
+          title
+          author
+        }
+      }
+    `;
+    const variables = { search: query };
+    if (cacheUtils.isValidCache(query, variables)) {
+      const cachedData = cacheUtils.getFromCache(query, variables);
+      setBooks(cachedData);
+    } else {
+      const response = await client.query({
+        query,
+        variables,
       });
-      cacheUtils.cacheUser(response.data.login.user);
-    } catch (error) {
-      console.error(error);
+      cacheUtils.setInCache(query, variables, response.data.books);
+      setBooks(response.data.books);
     }
   };
 
   return (
     <div>
-      <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} />
-      <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
-      <button onClick={handleLogin}>Login</button>
+      <form onSubmit={handleSearch}>
+        <input type="text" value={query} onChange={(event) => setQuery(event.target.value)} />
+        <button type="submit">Search</button>
+      </form>
+      <ul>
+        {books.map((book) => (
+          <li key={book.id}>{book.title} by {book.author}</li>
+        ))}
+      </ul>
     </div>
   );
 };
 
-export default Login;
+export default BookSearch;
 ``}
